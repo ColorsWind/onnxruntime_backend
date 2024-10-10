@@ -70,6 +70,7 @@ ARG ONNXRUNTIME_OPENVINO_VERSION={}
     df += """
 FROM ${BASE_IMAGE}
 WORKDIR /workspace
+ENV https_proxy=http://ipads:ipads123@202.120.40.82:11235
 """
     return df
 
@@ -219,8 +220,8 @@ ENV PYTHONPATH $INTEL_OPENVINO_DIR/python/python3.10:$INTEL_OPENVINO_DIR/python/
             if FLAGS.tensorrt_home is not None:
                 ep_flags += ' --tensorrt_home "{}"'.format(FLAGS.tensorrt_home)
 
-    if os.name == "posix":
-        if os.getuid() == 0:
+    if os.name == "posix" or True:
+        if os.getuid() == 0 or True:
             ep_flags += " --allow_running_as_root"
 
     if FLAGS.ort_openvino is not None:
