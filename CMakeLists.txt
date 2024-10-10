@@ -27,7 +27,7 @@
 cmake_minimum_required(VERSION 3.17)
 
 project(tritononnxruntimebackend LANGUAGES C CXX)
-
+set(CMAKE_CXX_STANDARD 17)
 #
 # Options
 #
@@ -213,6 +213,8 @@ add_library(
   src/onnxruntime_loader.h
   src/onnxruntime_utils.cc
   src/onnxruntime_utils.h
+  src/warm_cache.h
+  src/warm_cache.cc
 )
 
 add_library(

@@ -70,6 +70,7 @@ ARG ONNXRUNTIME_OPENVINO_VERSION={}
     df += """
 FROM ${BASE_IMAGE}
 WORKDIR /workspace
+ENV https_proxy=http://ipads:ipads123@202.120.40.82:11235
 """
     return df
 
