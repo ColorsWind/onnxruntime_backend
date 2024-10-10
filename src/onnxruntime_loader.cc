@@ -33,6 +33,7 @@
 #include <thread>
 
 #include "onnxruntime_utils.h"
+#include "triton/backend/backend_common.h"
 
 namespace triton { namespace backend { namespace onnxruntime {
 
@@ -48,6 +49,7 @@ OnnxLoader::~OnnxLoader()
 TRITONSERVER_Error*
 OnnxLoader::Init(common::TritonJson::Value& backend_config)
 {
+  LOG_MESSAGE(TRITONSERVER_LOG_INFO, "ONNXRuntime with WarmCache Init ONNX Loader.");
   if (loader == nullptr) {
     OrtEnv* env;
     // If needed, provide custom logger with
