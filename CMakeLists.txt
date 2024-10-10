@@ -349,7 +349,7 @@ if(TRITON_ONNXRUNTIME_DOCKER_BUILD)
     set(ENABLE_GPU_EXTRA_ARGS "--enable-gpu")
   endif() # TRITON_ENABLE_GPU
 
-  if (WIN32)
+  if (LINUX)
     add_custom_command(
       OUTPUT
         onnxruntime/lib/${ONNXRUNTIME_LIBRARY}
