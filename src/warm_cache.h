@@ -5,9 +5,12 @@
 #include <string>
 #include <unordered_map>
 #include <atomic>
-#include "onnxruntime_loader.h"
-#include "triton/backend/backend_common.h"
+#include <onnxruntime_loader.h>
+#include <onnxruntime_utils.h>
+#include <triton/backend/backend_common.h>
+#include <triton/backend/backend_model.h>
 #include <triton/core/tritonserver.h>
+
 
 #include <onnxruntime_c_api.h>
 
@@ -19,12 +22,18 @@ class CacheOrtSession {
 
   const bool is_path_;
   const std::string &model_;
-  const OrtSessionOptions *session_options_;
+  OrtSessionOptions *session_options_;
   OrtSession *session_;
   std::atomic<size_t> hotness;
   
   CacheOrtSession(const bool is_path, const std::string &model, const OrtSessionOptions *session_options)
-    : is_path_(is_path), model_(model), session_options_(session_options), session_(nullptr), hotness(0) {
+    : is_path_(is_path), model_(model), session_(nullptr), hotness(0) {
+    THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->CloneSessionOptions(session_options, &session_options_));
+  }
+
+  ~CacheOrtSession() {
+    ort_api->ReleaseSessionOptions(session_options_);
+    session_options_ = nullptr;
   }
 
   static std::mutex g_mutex;
