@@ -208,6 +208,7 @@ configure_file(src/libtriton_onnxruntime.ldscript libtriton_onnxruntime.ldscript
 
 add_library(
   triton-onnxruntime-backend SHARED
+  src/onnxruntime.h
   src/onnxruntime.cc
   src/onnxruntime_loader.cc
   src/onnxruntime_loader.h

@@ -29,6 +29,7 @@
 #include <mutex>
 #include <vector>
 
+#include "onnxruntime_c_api.h"
 #include "onnxruntime_loader.h"
 #include "onnxruntime_utils.h"
 #include "triton/backend/backend_common.h"
@@ -39,6 +40,7 @@
 #include "triton/backend/backend_output_responder.h"
 #include "triton/backend/device_memory_tracker.h"
 #include "warm_cache.h"
+#include <onnxruntime.h>
 
 #ifdef TRITON_ENABLE_GPU
 #include <cuda_runtime_api.h>
@@ -52,7 +54,7 @@ namespace triton { namespace backend { namespace onnxruntime {
 
 /// Deleter for OrtSession.
 struct SessionDeleter {
-  void operator()(CacheOrtSession* f) { CacheOrtSession::UnloadSession(f); }
+  void operator()(OrtSession* f) { OnnxLoader::UnloadSession(f); }
 };
 
 // BackendConfiguration
@@ -87,57 +89,7 @@ struct BackendConfiguration {
   int default_max_batch_size_{0};
 };
 
-//
-// ModelState
-//
-// State associated with a model that is using this backend. An object
-// of this class is created and associated with each
-// TRITONBACKEND_Model.
-//
-class ModelState : public BackendModel {
- public:
-  static TRITONSERVER_Error* Create(
-      TRITONBACKEND_Model* triton_model, ModelState** state);
-  virtual ~ModelState() = default;
 
-  // Load an ONNX model using 'artifact_name' as the name for the ONNX
-  // file/directory. If 'instance_group_kind' is not
-  // TRITONSERVER_INSTANCEGROUPKIND_AUTO then use it and
-  // 'instance_group_device_id' to initialize the appropriate
-  // execution providers. Return in 'model_path' the full path to the
-  // onnx file, return in 'session' and 'allocator' the ORT session
-  // and allocator.
-  TRITONSERVER_Error* LoadModel(
-      const std::string& artifact_name,
-      const TRITONSERVER_InstanceGroupKind instance_group_kind,
-      const int32_t instance_group_device_id, std::string* model_path,
-      CacheOrtSession** session, OrtAllocator** default_allocator,
-      cudaStream_t stream);
-
-  const std::map<std::string, std::pair<int64_t, int64_t>>& ModelOutputs()
-  {
-    return model_outputs_;
-  }
-
- private:
-  ModelState(TRITONBACKEND_Model* triton_model);
-  TRITONSERVER_Error* AutoCompleteConfig();
-  TRITONSERVER_Error* AutoCompleteMaxBatch(
-      const OnnxTensorInfoMap& input_tensor_infos,
-      const OnnxTensorInfoMap& output_tensor_infos);
-  TRITONSERVER_Error* AutoCompleteIO(
-      const char* key, const OnnxTensorInfoMap& io_infos);
-
-  // Session options used when creating a ORT session.
-  std::unique_ptr<OrtSessionOptions, SessionOptionsDeleter> session_options_;
-
-  // model_outputs is a map that contains unique outputs that the model must
-  // provide. In the model configuration, the output in the state configuration
-  // can have intersection with the outputs section of the model. If an output
-  // is specified both in the output section and state section, it indicates
-  // that the backend must return the output state to the client too.
-  std::map<std::string, std::pair<int64_t, int64_t>> model_outputs_;
-};
 
 TRITONSERVER_Error*
 ModelState::Create(TRITONBACKEND_Model* triton_model, ModelState** state)
@@ -213,6 +165,8 @@ ModelState::ModelState(TRITONBACKEND_Model* triton_model)
   // instance when creating that instance's session.
   OrtSessionOptions* soptions;
   THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->CreateSessionOptions(&soptions));
+
+  
   session_options_.reset(soptions);
 
   GraphOptimizationLevel optimization_level =
@@ -369,7 +323,7 @@ ModelState::LoadModel(
     const std::string& artifact_name,
     const TRITONSERVER_InstanceGroupKind instance_group_kind,
     const int32_t instance_group_device_id, std::string* model_path,
-    CacheOrtSession** session, OrtAllocator** default_allocator, cudaStream_t stream)
+    OrtSession** session, OrtAllocator** default_allocator, cudaStream_t stream)
 {
   // Find the ONNX file that describes the model itself. If the model
   // configuration doesn't have an explicit model file specified then
@@ -574,7 +528,10 @@ ModelState::LoadModel(
             &cuda_options.do_copy_in_default_stream, true));
       }
     }
-
+  // const char *DISABLE_CUDA_GRAPH[] = {"enable_cuda_graph", "0"};
+  // THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->UpdateCUDAProviderOptions(cuda_options, 
+  //   &DISABLE_CUDA_GRAPH[0], &DISABLE_CUDA_GRAPH[1], 1));
+  // THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->SessionOptionsAppendExecutionProvider_CUDA_V2(soptions, cuda_options));
     RETURN_IF_ORT_ERROR(ort_api->SessionOptionsAppendExecutionProvider_CUDA(
         soptions, &cuda_options));
     LOG_MESSAGE(
@@ -655,7 +612,7 @@ ModelState::LoadModel(
     glock.lock();
   }
 
-  RETURN_IF_ERROR(CacheOrtSession::LoadSession(
+  RETURN_IF_ERROR(OnnxLoader::LoadSession(
       true /* is_path */, *model_path, soptions, session));
 
   // get default cpu allocator
@@ -704,7 +661,7 @@ ModelState::AutoCompleteConfig()
 
   // Must cleanup 'session'. 'allocator' is default allocator which
   // is managed by ONNX Runtime so don't need to free/release
-  std::unique_ptr<CacheOrtSession, SessionDeleter> session;
+  std::unique_ptr<OrtSession, SessionDeleter> session;
   OrtAllocator* default_allocator;
   std::string model_path;
   {
@@ -734,21 +691,19 @@ ModelState::AutoCompleteConfig()
     }
 #endif  // TRITON_ENABLE_GPU
 
-    CacheOrtSession* sptr = nullptr;
+    OrtSession* sptr = nullptr;
     RETURN_IF_ERROR(LoadModel(
         artifact_name, kind, 0, &model_path, &sptr, &default_allocator,
         nullptr));
     session.reset(sptr);
   }
   {
-    auto lock = session->ReserveMutex();
-    auto *ort_session = session->Session(lock);
     OnnxTensorInfoMap input_tensor_infos;
     RETURN_IF_ERROR(
-        InputInfos(ort_session, default_allocator, input_tensor_infos));
+        InputInfos(session.get(), default_allocator, input_tensor_infos));
     OnnxTensorInfoMap output_tensor_infos;
     RETURN_IF_ERROR(
-        OutputInfos(ort_session, default_allocator, output_tensor_infos));
+        OutputInfos(session.get(), default_allocator, output_tensor_infos));
     RETURN_IF_ERROR(
         AutoCompleteMaxBatch(input_tensor_infos, output_tensor_infos));
     if (input_cnt == 0) {
@@ -910,117 +865,7 @@ ModelState::AutoCompleteIO(const char* key, const OnnxTensorInfoMap& io_infos)
   return nullptr;  // success
 }
 
-//
-// ModelInstanceState
-//
-// State associated with a model instance. An object of this class is
-// created and associated with each TRITONBACKEND_ModelInstance.
-//
-class ModelInstanceState : public BackendModelInstance {
- public:
-  static TRITONSERVER_Error* Create(
-      ModelState* model_state,
-      TRITONBACKEND_ModelInstance* triton_model_instance,
-      ModelInstanceState** state);
-  virtual ~ModelInstanceState();
 
-  // Get the state of the model that corresponds to this instance.
-  ModelState* StateForModel() const { return model_state_; }
-
-  // Execute...
-  void ProcessRequests(
-      TRITONBACKEND_Request** requests, const uint32_t request_count);
-
- private:
-  ModelInstanceState(
-      ModelState* model_state,
-      TRITONBACKEND_ModelInstance* triton_model_instance);
-  void ReleaseOrtRunResources();
-  TRITONSERVER_Error* ValidateBooleanSequenceControl(
-      triton::common::TritonJson::Value& sequence_batching,
-      const std::string& control_kind, bool required, bool* have_control);
-  TRITONSERVER_Error* ValidateTypedSequenceControl(
-      triton::common::TritonJson::Value& sequence_batching,
-      const std::string& control_kind, bool required, bool* have_control);
-  TRITONSERVER_Error* ValidateInputs(const size_t expected_input_cnt);
-  TRITONSERVER_Error* ValidateOutputs();
-  TRITONSERVER_Error* OrtRun(
-      std::vector<TRITONBACKEND_Response*>* responses,
-      const uint32_t response_count);
-  TRITONSERVER_Error* SetInputTensors(
-      size_t total_batch_size, TRITONBACKEND_Request** requests,
-      const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses,
-      BackendInputCollector* collector, std::vector<const char*>* input_names,
-      bool* cuda_copy);
-  TRITONSERVER_Error* SetStringInputTensor(
-      TRITONBACKEND_Request** requests, const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses, const char* input_name,
-      std::vector<const char*>* string_ptrs, bool* cuda_copy);
-  void SetStringInputBuffer(
-      const std::string& name, const std::vector<size_t>& expected_byte_sizes,
-      const std::vector<size_t>& expected_element_cnts,
-      std::vector<TRITONBACKEND_Response*>* responses, char* input_buffer,
-      std::vector<const char*>* string_ptrs);
-  void FillStringData(std::vector<const char*>* string_ptrs, size_t cnt);
-  TRITONSERVER_Error* ReadOutputTensors(
-      size_t total_batch_size, TRITONBACKEND_Request** requests,
-      const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses);
-
-  TRITONSERVER_Error* ReadOutputTensor(
-      std::vector<int64_t>& batchn_shape, TRITONSERVER_DataType& dtype,
-      OrtValue* output_tensor, void** output_buffer,
-      std::vector<std::vector<char>>& string_buffers,
-      std::vector<size_t>& offsets);
-  bool SetStringOutputBuffer(
-      const std::string& name, const char* content, const size_t* offsets,
-      std::vector<int64_t>* batchn_shape, TRITONBACKEND_Request** requests,
-      const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses);
-  bool SetStringStateBuffer(
-      const std::string& name, const char* content, const size_t* offsets,
-      std::vector<int64_t>* batchn_shape, TRITONBACKEND_Request** requests,
-      const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses);
-  bool SetStringBuffer(
-      const std::string& name, const char* content, const size_t* offsets,
-      std::vector<int64_t>* batchn_shape, TRITONBACKEND_Request** requests,
-      const uint32_t request_count,
-      std::vector<TRITONBACKEND_Response*>* responses, bool state);
-
-  ModelState* model_state_;
-
-  // The full path to the ONNX model file.
-  std::string model_path_;
-
-  // Onnx Runtime variables that are used across runs on this
-  // instance.
-  CacheOrtSession* session_;
-  OrtAllocator* default_allocator_;
-  OrtMemoryInfo* cuda_allocator_info_;
-  const OrtMemoryInfo* cpu_allocator_info_;
-  OrtIoBinding* io_binding_;
-  OrtRunOptions* runOptions_;
-  // map of output name -> bound mem type and id
-  std::unordered_map<std::string, std::pair<TRITONSERVER_MemoryType, int64_t>>
-      output_device_info_;
-  // map of output name -> tensor info
-  OnnxTensorInfoMap output_tensor_infos_;
-
-  // map of input name -> tensor info
-  OnnxTensorInfoMap input_tensor_infos_;
-
-  // A map from scalar output tensors to the dimension specified in model config
-  std::unordered_map<std::string, std::vector<int64_t>> scalar_outputs_;
-
-  // Onnx Runtime variables that will be reset and used for every run
-  // on this instance.
-  std::vector<OrtValue*> input_tensors_;
-  std::vector<OrtValue*> output_tensors_;
-  OrtValue** output_buffer_;
-  std::vector<BackendMemory*> input_tensor_memories_;
-};
 
 TRITONSERVER_Error*
 ModelInstanceState::Create(
@@ -1060,10 +905,8 @@ ModelInstanceState::ModelInstanceState(
   THROW_IF_BACKEND_INSTANCE_ORT_ERROR(
       ort_api->AllocatorGetInfo(default_allocator_, &cpu_allocator_info_));
 
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   THROW_IF_BACKEND_INSTANCE_ORT_ERROR(
-      ort_api->CreateIoBinding(ort_session, &io_binding_));
+      ort_api->CreateIoBinding(session_, &io_binding_));
 
   THROW_IF_BACKEND_INSTANCE_ORT_ERROR(ort_api->CreateRunOptions(&runOptions_));
 
@@ -1163,7 +1006,7 @@ ModelInstanceState::~ModelInstanceState()
   ort_api->ReleaseIoBinding(io_binding_);
   ort_api->ReleaseMemoryInfo(cuda_allocator_info_);
   if (session_ != nullptr) {
-    CacheOrtSession::UnloadSession(session_);
+    OnnxLoader::UnloadSession(session_);
   }
   // 'default_allocator_' is default allocator which is managed by ONNX
   // Runtime
@@ -1216,8 +1059,6 @@ ModelInstanceState::ValidateBooleanSequenceControl(
     triton::common::TritonJson::Value& sequence_batching,
     const std::string& control_kind, bool required, bool* have_control)
 {
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   std::string tensor_name;
   std::string tensor_datatype;
   RETURN_IF_ERROR(GetBooleanSequenceControlProperties(
@@ -1228,7 +1069,7 @@ ModelInstanceState::ValidateBooleanSequenceControl(
   if (*have_control) {
     OnnxTensorInfoMap input_tensor_infos;
     RETURN_IF_ERROR(
-        InputInfos(ort_session, default_allocator_, input_tensor_infos));
+        InputInfos(session_, default_allocator_, input_tensor_infos));
     const auto& iit = input_tensor_infos.find(tensor_name);
     if (iit == input_tensor_infos.end()) {
       return TRITONSERVER_ErrorNew(
@@ -1276,8 +1117,6 @@ ModelInstanceState::ValidateTypedSequenceControl(
     triton::common::TritonJson::Value& sequence_batching,
     const std::string& control_kind, bool required, bool* have_control)
 {
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   std::string tensor_name;
   std::string tensor_datatype;
   RETURN_IF_ERROR(GetTypedSequenceControlProperties(
@@ -1287,7 +1126,7 @@ ModelInstanceState::ValidateTypedSequenceControl(
   if (*have_control) {
     OnnxTensorInfoMap input_tensor_infos;
     RETURN_IF_ERROR(
-        InputInfos(ort_session, default_allocator_, input_tensor_infos));
+        InputInfos(session_, default_allocator_, input_tensor_infos));
     const auto& iit = input_tensor_infos.find(tensor_name);
     if (iit == input_tensor_infos.end()) {
       return TRITONSERVER_ErrorNew(
@@ -1333,20 +1172,18 @@ ModelInstanceState::ValidateTypedSequenceControl(
 TRITONSERVER_Error*
 ModelInstanceState::ValidateInputs(const size_t expected_input_cnt)
 {
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   std::set<std::string> input_tensor_names;
-  RETURN_IF_ERROR(InputNames(ort_session, input_tensor_names));
+  RETURN_IF_ERROR(InputNames(session_, input_tensor_names));
   RETURN_IF_ERROR(
-      InputInfos(ort_session, default_allocator_, input_tensor_infos_));
+      InputInfos(session_, default_allocator_, input_tensor_infos_));
 
   std::set<std::string> overridable_initializer_tensor_names;
   RETURN_IF_ERROR(OverridableInitializerNames(
-      ort_session, overridable_initializer_tensor_names));
+      session_, overridable_initializer_tensor_names));
 
   OnnxTensorInfoMap overridable_initializer_tensor_infos;
   RETURN_IF_ERROR(OverridableInitializerInfos(
-      ort_session, default_allocator_, overridable_initializer_tensor_infos));
+      session_, default_allocator_, overridable_initializer_tensor_infos));
 
   if (input_tensor_infos_.size() != expected_input_cnt) {
     return TRITONSERVER_ErrorNew(
@@ -1483,13 +1320,11 @@ TRITONSERVER_Error*
 ModelInstanceState::ValidateOutputs()
 {
   // FIXME: big lock / no lock
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   std::set<std::string> output_tensor_names;
-  RETURN_IF_ERROR(OutputNames(ort_session, output_tensor_names));
+  RETURN_IF_ERROR(OutputNames(session_, output_tensor_names));
 
   RETURN_IF_ERROR(
-      OutputInfos(ort_session, default_allocator_, output_tensor_infos_));
+      OutputInfos(session_, default_allocator_, output_tensor_infos_));
 
   triton::common::TritonJson::Value ios;
   RETURN_IF_ERROR(model_state_->ModelConfig().MemberAsArray("output", &ios));
@@ -1885,10 +1720,8 @@ ModelInstanceState::OrtRun(
     std::vector<TRITONBACKEND_Response*>* responses,
     const uint32_t response_count)
 {
-  auto lock = session_->ReserveMutex();
-  auto *ort_session = session_->Session(lock);
   RETURN_IF_ORT_ERROR(
-      ort_api->RunWithBinding(ort_session, runOptions_, io_binding_));
+      ort_api->RunWithBinding(session_, runOptions_, io_binding_));
   return nullptr;
 }
 
@@ -2826,9 +2659,9 @@ TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelInstance* instance)
 
   // Create a ModelInstanceState object and associate it with the
   // TRITONBACKEND_ModelInstance.
-  ModelInstanceState* instance_state;
+  CacheModelInstanceState* instance_state;
   RETURN_IF_ERROR(
-      ModelInstanceState::Create(model_state, instance, &instance_state));
+      CacheModelInstanceState::Create(model_state, instance, &instance_state));
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceSetState(
       instance, reinterpret_cast<void*>(instance_state)));
 
@@ -2849,14 +2682,14 @@ TRITONBACKEND_ModelInstanceFinalize(TRITONBACKEND_ModelInstance* instance)
 {
   void* vstate;
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(instance, &vstate));
-  ModelInstanceState* instance_state =
-      reinterpret_cast<ModelInstanceState*>(vstate);
+  CacheModelInstanceState* instance_state =
+      reinterpret_cast<CacheModelInstanceState*>(vstate);
 
   LOG_MESSAGE(
       TRITONSERVER_LOG_INFO,
       "TRITONBACKEND_ModelInstanceFinalize: delete instance state");
 
-  delete instance_state;
+  CacheModelInstanceState::Delete(instance_state);
 
   return nullptr;  // success
 }
@@ -2873,9 +2706,13 @@ TRITONBACKEND_ModelInstanceExecute(
   // 'instance' objects). Suggested practice for this is to use only
   // function-local and model-instance-specific state (obtained from
   // 'instance'), which is what we do here.
-  ModelInstanceState* instance_state;
+  CacheModelInstanceState* cache_instance_state;
   RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceState(
-      instance, reinterpret_cast<void**>(&instance_state)));
+      instance, reinterpret_cast<void**>(&cache_instance_state)));
+
+
+  auto lock = cache_instance_state->ReserveMutex();
+  ModelInstanceState* instance_state = cache_instance_state->State(lock);
   ModelState* model_state = instance_state->StateForModel();
   // auto &warm_cache = WarmModelCache::Get();
   // warm_cache.LoadModel(model_state);
@@ -2898,7 +2735,7 @@ TRITONBACKEND_ModelInstanceExecute(
   // particular request then we send an error response just for the
   // specific request.
   instance_state->ProcessRequests(requests, request_count);
-
+  cudaStreamSynchronize(instance_state->CudaStream());
   return nullptr;  // success
 }
 
