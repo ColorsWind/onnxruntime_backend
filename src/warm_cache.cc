@@ -4,7 +4,7 @@
 
 namespace triton::backend::onnxruntime {
 
-std::mutex CacheOrtSession::g_mutex;
+std::recursive_mutex CacheOrtSession::g_mutex;
 std::unordered_map<std::string, CacheOrtSession*> CacheOrtSession::sessions;
 size_t CacheOrtSession::loaded_model_num = 0;
 
