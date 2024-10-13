@@ -22,7 +22,7 @@ namespace triton::backend::onnxruntime {
 static const constexpr bool SKIP_WARM_CACHE = false;
 
 class CacheModelInstanceState {
- private:
+ public:
   std::mutex s_mutex_;
 
   ModelState *arg0_model_state_;
@@ -43,7 +43,7 @@ class CacheModelInstanceState {
   static std::recursive_mutex g_mutex;
   static std::unordered_map<std::string, CacheModelInstanceState*> sessions;
   static size_t loaded_model_num;
-  static const constexpr size_t MAX_LOADED_MODEL_NUM = 4;
+  static const constexpr size_t MAX_LOADED_MODEL_NUM = 8;
 
   static std::vector<std::pair<size_t, CacheModelInstanceState*>> GetSessionsHotness() {
     std::vector<std::pair<size_t, CacheModelInstanceState*>> ret;
@@ -122,6 +122,17 @@ class CacheModelInstanceState {
 
   size_t GetHotness() {
     return hotness.load(std::memory_order_relaxed);
+  }
+
+  void UnLoadWithSLock(std::unique_lock<std::mutex> &s_lock) {
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("[WarmCache] UnLoad: ") + Name() + ".").c_str());
+    // std::unique_lock g_lock{g_mutex};
+    // std::unique_lock s_lock{s_mutex_};
+    if (mayeb_state_ != nullptr) {
+      // delete mayeb_state_;
+      mayeb_state_ = nullptr;
+      loaded_model_num--;
+    }
   }
 
   static TRITONSERVER_Error* Create(

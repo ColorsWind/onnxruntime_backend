@@ -27,6 +27,8 @@
 #include <stdint.h>
 
 #include <mutex>
+#include <string>
+#include <variant>
 #include <vector>
 
 #include "onnxruntime_c_api.h"
@@ -39,6 +41,7 @@
 #include "triton/backend/backend_model_instance.h"
 #include "triton/backend/backend_output_responder.h"
 #include "triton/backend/device_memory_tracker.h"
+#include "triton/core/tritonserver.h"
 #include "warm_cache.h"
 #include <onnxruntime.h>
 
@@ -498,13 +501,24 @@ ModelState::LoadModel(
     // Default GPU execution provider.
     // Using default values for everything other than device id and cuda
     // stream
-    OrtCUDAProviderOptions cuda_options;
-    cuda_options.device_id = instance_group_device_id;
-    cuda_options.has_user_compute_stream = stream != nullptr ? 1 : 0;
-    cuda_options.user_compute_stream =
-        stream != nullptr ? (void*)stream : nullptr,
-    cuda_options.default_memory_arena_cfg = nullptr;
+    OrtCUDAProviderOptionsV2 *cuda_options;
+    RETURN_IF_ORT_ERROR(ort_api->CreateCUDAProviderOptions(&cuda_options));
 
+    // cuda_options.device_id = instance_group_device_id;
+    cuda_options_str.emplace_back("device_id", std::to_string(instance_group_device_id));
+    // cuda_options.has_user_compute_stream = stream != nullptr ? 1 : 0;
+    cuda_options_str.emplace_back("has_user_compute_stream", stream != nullptr ? "1" : "0");
+    // cuda_options.user_compute_stream = stream != nullptr ? (void*)stream : nullptr,
+    if (stream == nullptr) {
+      cuda_options_str.emplace_back("has_user_compute_stream", "0");
+    } else {
+      cuda_options_str.emplace_back("has_user_compute_stream", "1");
+      cuda_options_str.emplace_back("user_compute_stream", (void*)stream);
+    }
+    // cuda_options.default_memory_arena_cfg = nullptr;
+    cuda_options_str.emplace_back("default_memory_arena_cfg", (void*)nullptr);
+
+    cuda_options_str.emplace_back("enable_cuda_graph", "1");
     {
       // Parse CUDA EP configurations
       triton::common::TritonJson::Value params;
@@ -512,28 +526,45 @@ ModelState::LoadModel(
         int cudnn_conv_algo_search = 0;
         RETURN_IF_ERROR(TryParseModelStringParameter(
             params, "cudnn_conv_algo_search", &cudnn_conv_algo_search, 0));
-        cuda_options.cudnn_conv_algo_search =
-            static_cast<OrtCudnnConvAlgoSearch>(cudnn_conv_algo_search);
-
+        // cuda_options.cudnn_conv_algo_search =
+        //     static_cast<OrtCudnnConvAlgoSearch>(cudnn_conv_algo_search);
+        const std::string algo[] { "EXHAUSTIVE", "HEURISTIC", "DEFAULT"};
+        cuda_options_str.emplace_back("cudnn_conv_algo_search", algo[cudnn_conv_algo_search]);
+        size_t gpu_mem_limit;
         RETURN_IF_ERROR(TryParseModelStringParameter(
-            params, "gpu_mem_limit", &cuda_options.gpu_mem_limit,
+            params, "gpu_mem_limit", &gpu_mem_limit,
             std::numeric_limits<size_t>::max()));
-
+        cuda_options_str.emplace_back("gpu_mem_limit", std::to_string(gpu_mem_limit));
+        size_t arena_extend_strategy;
+        std::string strategy[] = {"kNextPowerOfTwo", "kSameAsRequested"};
         RETURN_IF_ERROR(TryParseModelStringParameter(
             params, "arena_extend_strategy",
-            &cuda_options.arena_extend_strategy, 0));
-
+            &arena_extend_strategy, 0));
+        cuda_options_str.emplace_back("arena_extend_strategy", strategy[arena_extend_strategy]);
+        bool do_copy_in_default_stream;
         RETURN_IF_ERROR(TryParseModelStringParameter(
             params, "do_copy_in_default_stream",
-            &cuda_options.do_copy_in_default_stream, true));
+            &do_copy_in_default_stream, true));
+        cuda_options_str.emplace_back("do_copy_in_default_stream", do_copy_in_default_stream ? "1" : "0");
+      }
+    }
+    for (auto &&[key, value] : cuda_options_str) {
+      if (value.index() == 0) {
+        std::string str = std::get<0>(value);
+        const char *key_cstr = key.c_str();
+        const char *value_cstr = str.c_str();
+        RETURN_IF_ORT_ERROR(ort_api->UpdateCUDAProviderOptions(cuda_options, &key_cstr, &value_cstr, 1));
+      } else {
+        void *ptr = std::get<1>(value);
+        RETURN_IF_ORT_ERROR(ort_api->UpdateCUDAProviderOptionsWithValue(cuda_options, key.c_str(), ptr));
       }
     }
   // const char *DISABLE_CUDA_GRAPH[] = {"enable_cuda_graph", "0"};
   // THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->UpdateCUDAProviderOptions(cuda_options, 
   //   &DISABLE_CUDA_GRAPH[0], &DISABLE_CUDA_GRAPH[1], 1));
   // THROW_IF_BACKEND_MODEL_ORT_ERROR(ort_api->SessionOptionsAppendExecutionProvider_CUDA_V2(soptions, cuda_options));
-    RETURN_IF_ORT_ERROR(ort_api->SessionOptionsAppendExecutionProvider_CUDA(
-        soptions, &cuda_options));
+    RETURN_IF_ORT_ERROR(ort_api->SessionOptionsAppendExecutionProvider_CUDA_V2(
+        soptions, cuda_options));
     LOG_MESSAGE(
         TRITONSERVER_LOG_VERBOSE,
         (std::string("CUDA Execution Accelerator is set for '") + Name() +

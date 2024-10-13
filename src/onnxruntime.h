@@ -8,6 +8,7 @@
 #include <onnxruntime_utils.h>
 
 #include <onnxruntime_c_api.h>
+#include <variant>
 
 namespace triton::backend::onnxruntime {
 //
@@ -50,7 +51,7 @@ class ModelState : public BackendModel {
       const OnnxTensorInfoMap& output_tensor_infos);
   TRITONSERVER_Error* AutoCompleteIO(
       const char* key, const OnnxTensorInfoMap& io_infos);
-
+  std::vector<std::pair<std::string, std::variant<std::string, void*>>> cuda_options_str;
   // Session options used when creating a ORT session.
   std::unique_ptr<OrtSessionOptions, SessionOptionsDeleter> session_options_;
 
